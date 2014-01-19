@@ -58,6 +58,7 @@ typedef struct _obPlane
 {
 	SC_OTYPE type;
 	SC3 pos, dir;
+	int col[3];
 } obPlane;
 
 typedef struct _obSphere
@@ -65,6 +66,7 @@ typedef struct _obSphere
 	SC_OTYPE type;
 	SC3 pos;
 	float rad;
+	int col[3];
 } obSphere;
 
 typedef struct _obCamera
@@ -95,6 +97,12 @@ typedef struct _Scene
 	Vector objs, cameras, lights;
 } Scene;
 
+typedef struct _grLighting
+{
+	SC3 pos, dir;
+	int col[3];
+} grLighting;
+
 Scene *sc_init ()
 {
 	Scene *sc = malloc(sizeof(*sc));
@@ -113,7 +121,7 @@ Object *sc_newobj (Scene *sc, SC_OTYPE type)
 			obj->pointlight = (obPointlight) {type, {0.0, 0.0, 0.0}, 1.0};
 			break;
 		case SC_PLANE:
-			obj->plane = (obPlane) {type, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}};
+			obj->plane = (obPlane) {type, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, {255, 255, 255}};
 			break;
 		case SC_CAMERA:
 			obj->camera = (obCamera) {type, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, {1.0, 1.0}};
@@ -122,7 +130,7 @@ Object *sc_newobj (Scene *sc, SC_OTYPE type)
 			obj->ray = (obRay) {type, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}};
 			break;
 		case SC_SPHERE:
-			obj->sphere = (obSphere) {type, {0.0, 0.0, 0.0}, 1.0};
+			obj->sphere = (obSphere) {type, {0.0, 0.0, 0.0}, 1.0, {255, 255, 255}};
 			break;
 		default:
 			return NULL;
@@ -209,6 +217,19 @@ float *ob_setrad (Object *obj, float rad)
 	}
 }
 
+int *ob_setcol (Object *obj, int col[3])
+{
+	switch (obj->type)
+	{
+		case SC_SPHERE:
+			return memcpy (obj->sphere.col, col, sizeof(int[3]));
+		case SC_PLANE:
+			return memcpy (obj->plane.col, col, sizeof(int[3]));
+		default:
+			return NULL;
+	}
+}
+
 void vm_cross (float *d, SC3 s1, SC3 s2)
 {
 	d[0] = s1[2] * s2[1] - s1[1] * s2[2];
@@ -247,38 +268,67 @@ float vm_dot (SC3 s1, SC3 s2)
 	return s1[0]*s2[0] + s1[1]*s2[1] + s1[2]*s2[2];
 }
 
-float gr_solvepointlight (Object *obj, SC3 point, SC3 normal, SC3 campos)
+void vm_norm (float *dest, SC3 s)
+{
+	vm_scale (dest, s, 1.0/vm_mod(s));
+}
+
+void gr_solvepointlight (Object *obj, SC3 point, SC3 normal, SC3 campos, float *lums)
 { 
 	SC3 from, from1;
 	vm_sub (from, point, obj->pointlight.pos);
 	vm_sub (from1, point, campos);
 	if (vm_dot (from, normal)*vm_dot (from1, normal) < 0.0)
-		return 0.0;
-	float d2 = vm_dot (from, from);
-	d2 /= vm_dot (normal, from) / (vm_mod(normal) * vm_mod(from));
-	d2 /= obj->pointlight.lum;
-	*((Uint32*)&d2) &= 0x7FFFFFFF;
-	return d2;
+		return;
+	float lum = 1.0 / vm_dot (from, from);
+	lum *= vm_dot (normal, from) / (vm_mod(normal) * vm_mod(from));
+	lum *= obj->pointlight.lum;
+	*((Uint32*)&lum) &= 0x7FFFFFFF;
+	SC3 a, b;
+	vm_sum (a, from, from1);
+	vm_norm (a, a);
+	vm_norm (b, normal);
+	float s = -vm_dot (a, b);
+	lums[0] += lum;
+	if (s > 0.0)
+	{
+		s *= s;
+		s *= s;
+		s *= s;
+		s *= s;
+		s *= s;
+		s *= s;
+		s *= s;
+		s *= s;
+		s *= s;
+		lums[1] += lum*s;
+	}
 }
 
-float gr_solvelights (Scene *sc, SC3 point, SC3 normal, SC3 campos)
+void gr_solvelights (Scene *sc, SC3 point, SC3 normal, SC3 campos, int *rgb)
 {
 	Vector lights = sc->lights;
 	int i;
-	float d2 = 0.0;
+	float lum[2] = {0.0, 0.0};
 	for (i = 0; i < lights->len; ++ i)
 	{
 		Object **obj = v_at (lights, i);
-		float x = gr_solvepointlight (*obj, point, normal, campos);
-		if (x != 0.0)
-			d2 += 1.0 / x;
+		gr_solvepointlight (*obj, point, normal, campos, lum);
 	}
-	if (d2 == 0.0)
-		return 0.0;
-	return 255.0 / (1.0/d2 + 1);
+	if (lum[0] == 0.0)
+	{
+		rgb[0] = rgb[1] = rgb[2] = 0;
+		return;
+	}
+	rgb[0] = (int) (lum[0]*rgb[0] / (1.0 + lum[0]));
+	rgb[0] = 255 - (float)(255-rgb[0]) / (lum[1]+1);
+	rgb[1] = (int) (lum[0]*rgb[1] / (1.0 + lum[0]));
+	rgb[1] = 255 - (float)(255-rgb[1]) / (lum[1]+1);
+	rgb[2] = (int) (lum[0]*rgb[2] / (1.0 + lum[0]));
+	rgb[2] = 255 - (float)(255-rgb[2]) / (lum[1]+1);
 }
 
-void gr_solveplane (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, float *maxpixel, Scene *sc, Object *camera)
+void gr_solveplane (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, grLighting *ldata)
 {
 	obPlane *plane = &obj->plane;
 	SC3 v;
@@ -291,13 +341,13 @@ void gr_solveplane (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, float 
 	{
 		*maxparam = param;
 		vm_scale (v, raydir, param);
-		vm_sum (v, v, raypos);
-		float br = gr_solvelights (sc, v, plane->dir, camera->camera.pos);
-		maxpixel[0] = maxpixel[1] = maxpixel[2] = br;
+		vm_sum (ldata->pos, v, raypos);
+		memcpy (ldata->dir, plane->dir, sizeof(SC3));
+		memcpy (ldata->col, plane->col, sizeof(int[3]));
 	}
 }
 
-void gr_solvesphere (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, float *maxpixel, Scene *sc, Object *camera)
+void gr_solvesphere (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, grLighting *ldata)
 {
 	obSphere *sphere = &obj->sphere;
 	float A = vm_dot (raydir, raydir);
@@ -328,37 +378,52 @@ void gr_solvesphere (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, float
 	{
 		*maxparam = param;
 		vm_scale (v, raydir, param);
-		vm_sum (v, v, raypos);
-		vm_sub (X, v, sphere->pos);
-		float br = gr_solvelights (sc, v, X, camera->camera.pos);
-		maxpixel[0] = maxpixel[1] = maxpixel[2] = br;
+		vm_sum (ldata->pos, v, raypos);
+		vm_sub (ldata->dir, ldata->pos, sphere->pos);
+		memcpy (ldata->col, sphere->col, sizeof(int[3]));
 	}
 }
 
-void gr_solve (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, float *maxpixel, Scene *sc, Object *camera)
+void gr_solve (Object *obj, SC3 raypos, SC3 raydir, float *maxparam, grLighting *ldata)
 {
 	switch (obj->type)
 	{
 		case SC_PLANE:
-			gr_solveplane (obj, raypos, raydir, maxparam, maxpixel, sc, camera);
+			gr_solveplane (obj, raypos, raydir, maxparam, ldata);
 			break;
 		case SC_SPHERE:
-			gr_solvesphere (obj, raypos, raydir, maxparam, maxpixel, sc, camera);
+			gr_solvesphere (obj, raypos, raydir, maxparam, ldata);
 			break;
 		default:
 			break;
 	}
 }
 
-void gr_render (SDL_Surface *screen, Scene *scene, Object *camera)
+typedef struct _grThread
 {
-	Object *ray = sc_newobj (NULL, SC_RAY);
-	ob_setpos (ray, camera->camera.pos);
-	float *raydir = ob_setdir (ray, camera->camera.dir);
+	SDL_Surface *screen;
+	Scene *scene;
+	Object *camera;
+	int start, end;
+	SC3 xdir, ydir;
+	SC3 hdir, vdir;
+	SC3 curdir, curxdir, curydir;
+} grThread;
+
+int gr_renderthread (void *data)
+{
+	grThread *t = data;
+	SDL_Surface *screen = t->screen;
+	Scene *scene = t->scene;
+	Object *camera = t->camera;
+	int START = t->start, END = t->end;
+	float *xdir = t->xdir, *ydir = t->ydir;
+	float *hdir = t->hdir, *vdir = t->vdir;
+	float *curdir = t->curdir, *curxdir = t->curxdir, *curydir = t->curydir;
+
+	float *raypos = camera->camera.pos, *raydir = camera->camera.dir;
 
 	int width = screen->w, height = screen->h;
-	SC3 xdir = {1.0, 0.0, 0.0}, ydir = {0.0, 1.0, 0.0};
-	SC3 hdir, vdir;
 
 	vm_cross (hdir, raydir, ydir);
 	vm_cross (vdir, raydir, xdir);
@@ -368,34 +433,65 @@ void gr_render (SDL_Surface *screen, Scene *scene, Object *camera)
 	vm_scale (vdir, vdir, camera->camera.dim[1] / (vm_mod(vdir)*height));
 	//printf ("%f %f %f\n", vdir[0], vdir[1], vdir[2]);
 
-	SC3 curdir, curxdir, curydir;
+	grLighting ldata;
 	int x, y, i;
-	SDL_LockSurface(screen);
-	for (x = -width/2; x < width/2; ++ x)
+	vm_scale (curxdir, hdir, .5 - width/2);
+	vm_scale (curydir, vdir, .5 - height/2);
+	vm_sum (curdir, raydir, curxdir);
+	vm_sum (curdir, curdir, curydir);
+	vm_scale (curydir, vdir, -height);
+	vm_scale (curxdir, hdir, START);
+	vm_sum (curdir, curdir, curxdir);
+	Uint8 *p = screen->pixels + 4*START;
+	SC3 ncdir;
+	for (x = START; x < END; ++ x, vm_sum (curdir, curdir, hdir), p += 4)
 	{
-		vm_scale (curxdir, hdir, .5+x);
-		vm_scale (curydir, vdir, .5-height/2);
-		vm_sum (curdir, raydir, curxdir);
-		vm_sum (curdir, curdir, curydir);
-		for (y = 0; y < height; ++ y)
+		for (y = 0; y < height; ++ y, vm_sum (curdir, curdir, vdir), p += screen->pitch)
 		{
-			vm_sum (curdir, curdir, vdir);
 			//printf ("%f %f %f\n", curdir[0], curdir[1], curdir[2]);
 			float maxparam = 1000.0;
-			SC3 maxpixel = {0.0, 0.0, 0.0};
-			for (i = 0; i < scene->objs->len; ++ i)
-			{
-				Object **obj = v_at(scene->objs, i);
-				gr_solve (*obj, ray->ray.pos, curdir, &maxparam, maxpixel, scene, camera);
-			}
+			ldata = (grLighting) {{0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}};
+			Object **obj = scene->objs->data;
+			int len = scene->objs->len;
+			vm_norm (ncdir, curdir);
+			for (i = 0; i < len; ++ i, ++ obj)
+				gr_solve (*obj, raypos, ncdir, &maxparam, &ldata);
+			gr_solvelights (scene, ldata.pos, ldata.dir, camera->camera.pos, ldata.col);
 			//if (y == -height/2)
 			//	printf("%d\n", (int)maxpixel[0]);
-			Uint32 *p = (Uint32*) ((Uint8*) screen->pixels + y * screen->pitch + (x+height/2) * 4);
-			*p = SDL_MapRGB (screen->format, maxpixel[0], maxpixel[1], maxpixel[2]);
+			*(Uint32*)p = SDL_MapRGB (screen->format, ldata.col[0], ldata.col[1], ldata.col[2]);
 			//printf ("%f %f %f\n", maxpixel[0], maxpixel[1], maxpixel[2]);
 		}
+		p -= screen->pitch * height;
+		vm_sum (curdir, curdir, curydir);
 	}
-	SDL_UnlockSurface(screen);
+}
+
+#define THREADS 8
+void gr_render (SDL_Surface *screen, Scene *scene, Object *camera)
+{
+	grThread threads[THREADS];
+	SDL_Thread *thread[THREADS];
+	int i;
+	for (i = 0; i < THREADS; ++ i)
+	{
+		threads[i] = (grThread) {
+			screen, scene, camera, i*screen->h/THREADS, (i+1)*screen->h/THREADS,
+			{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+			{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},
+			{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}
+		};
+	}
+
+	SDL_LockSurface (screen);
+
+	for (i = 0; i < THREADS; ++ i)
+		thread[i] = SDL_CreateThread (gr_renderthread, threads+i);
+
+	for (i = 0; i < THREADS; ++ i)
+		SDL_WaitThread (thread[i], NULL);
+
+	SDL_UnlockSurface (screen);
 	SDL_UpdateRect (screen, 0, 0, 0, 0);
 }
 
@@ -411,11 +507,11 @@ int main (int argc, char *argv[])
 		   *sphere2 = sc_newobj (scene, SC_SPHERE),
 		   *cam = sc_newobj (scene, SC_CAMERA);
 
-	ob_setpos (light1, sc3(5.0, 5.0, 5.0));
-	ob_setlum (light1, 250.0);
+	ob_setpos (light1, sc3(5.0, 10.0, 5.0));
+	ob_setlum (light1, 200.0);
 
-	ob_setpos (light2, sc3(0.0, 0.0, -0.99));
-	ob_setlum (light2, 0.0);
+	ob_setpos (light2, sc3(-5.0, -10.0, 10));
+	ob_setlum (light2, 100.0);
 
 	ob_setpos (plane, sc3(0.0, 0.0, -8.0));
 	ob_setdir (plane, sc3(0.0, 0.0, 1.0));
@@ -423,8 +519,9 @@ int main (int argc, char *argv[])
 	ob_setpos (sphere1, sc3(0.0, 0.0, -3.0));
 	ob_setrad (sphere1, 2.0);
 
-	ob_setpos (sphere2, sc3(0.0, -3.5, 3.0));
+	ob_setpos (sphere2, sc3(0.0, 7.0, 3.0));
 	ob_setrad (sphere2, 1.0);
+	ob_setcol (sphere2, (int[3]){255, 0, 0});
 
 	ob_setpos (cam, sc3(0.0, 0.0, 100.0));
 	ob_setdir (cam, sc3(0.0, 0.0, -1.0));
@@ -435,7 +532,7 @@ int main (int argc, char *argv[])
 	{
 		gr_render (screen, scene, cam);
 		//ob_setpos (light1, sc3(10.0, 10.0, 5.0 -0.1 * i));
-		ob_setpos (sphere2, sc3(0.0, -3.5+0.08*i, 3.0));
+		ob_setpos (sphere2, sc3(7.0*sin(0.03*i), 7.0*cos(0.03*i), 3.0));
 		//SDL_Delay(20);
 	}
 
